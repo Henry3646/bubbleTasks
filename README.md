@@ -71,20 +71,4 @@ components/
 ├── TaskDetail.tsx # Bubble description modal
 └── TaskModal.tsx # Task creation form
 
-## Contributing 🤝
-
-We welcome contributions! Please:
-1. Open an issue to discuss changes
-2. Fork the repository
-3. Create a feature branch (`git checkout -b feature/amazing-feature`)
-4. Commit changes (`git commit -m 'Add amazing feature'`)
-5. Push to branch (`git push origin feature/amazing-feature`)
-6. Open a Pull Request
-
-## License 📄
-
-MIT License - see [LICENSE.md](LICENSE.md) for details
-
----
-
 Made with ❤️ by Henry Arlt - *Turning task management into bubble therapy!*
