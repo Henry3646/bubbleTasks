@@ -1,5 +1,5 @@
 import React, { useCallback, useRef, useState, useEffect } from 'react';
-import { Animated, PanResponder, StyleSheet, Text, Dimensions } from 'react-native';
+import { Animated, PanResponder, Text, Dimensions } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { Task, BUBBLE_SIZES, BUBBLE_COLORS } from '~/lib/types';
 
@@ -10,110 +10,76 @@ interface TaskBubbleProps {
   onPositionChange: (x: number, y: number) => void;
 }
 
+// Constants
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const SCREEN_HEIGHT = Dimensions.get('window').height;
-const LONG_PRESS_DURATION = 2000; // 2 seconds
-const COLLISION_BOUNCE = 0.8; // Increased from 0.6 for bouncier collisions
-const BASE_SPEED = 0.5; // Base movement speed
-const MAX_SPEED = 16; // Increased from 5 to allow faster movement
-const DRAG_COEFFICIENT = 0.995; // Increased from 0.98 for much less friction
-const RANDOM_FORCE = 0.02; // Random movement strength
-const TARGET_SPEED = 0.8; // Speed the bubbles will tend towards
-const SPEED_ADJUSTMENT_RATE = 0.002; // Reduced from 0.005 to maintain momentum longer
+const LONG_PRESS_DURATION = 2000; // Full long press duration for popping (2 seconds)
+const DRAG_THRESHOLD_DURATION = 350; // Increased from 250ms to make popping easier to trigger
+const MOVEMENT_THRESHOLD = 15; // Increased from 5px to allow more movement before switching to drag
+const INITIAL_VELOCITY = 0.5; // Initial low velocity
+const DRAG_FRICTION = 0.95; // Friction applied after dragging (higher = less friction)
+const NATURAL_FRICTION = 0.98; // Natural friction during regular movement
+const COLLISION_BOUNCE = 0.8; // Bounce factor for collisions
 
 export function TaskBubble({ task, onPress, onComplete, onPositionChange }: TaskBubbleProps) {
+  // State and refs
   const [isPressing, setIsPressing] = useState(false);
-  const pressStartTime = useRef<number>(0);
-  const pressStartPosition = useRef({ x: 0, y: 0 });
-  const pressTimer = useRef<NodeJS.Timeout>();
-  const hapticInterval = useRef<NodeJS.Timeout>();
+  const [isPopping, setIsPopping] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  
+  const size = BUBBLE_SIZES[task.priority];
+  const color = BUBBLE_COLORS[task.priority];
+  
+  // Animation refs
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const opacityAnim = useRef(new Animated.Value(1)).current;
   
-  // Calculate initial position from center
-  const size = BUBBLE_SIZES[task.priority];
+  // Position and movement tracking
   const screenCenterX = SCREEN_WIDTH / 2;
   const screenCenterY = SCREEN_HEIGHT / 2;
   const initialPosition = {
-    x: screenCenterX - size / 2 + (Math.random() * 2 - 1) * 50, // Random offset ±50px from center
-    y: screenCenterY - size / 2 + (Math.random() * 2 - 1) * 50  // Random offset ±50px from center
+    x: screenCenterX - size / 2 + (Math.random() * 2 - 1) * 50,
+    y: screenCenterY - size / 2 + (Math.random() * 2 - 1) * 50
   };
   
   const position = useRef(new Animated.ValueXY(initialPosition)).current;
   const velocity = useRef({
-    x: (Math.random() * 2 - 1) * BASE_SPEED,
-    y: (Math.random() * 2 - 1) * BASE_SPEED
+    x: (Math.random() * 2 - 1) * INITIAL_VELOCITY,
+    y: (Math.random() * 2 - 1) * INITIAL_VELOCITY
   });
+  
+  // Interaction tracking
+  const pressStartTime = useRef(0);
+  const lastPosition = useRef({ x: 0, y: 0 });
   const lastGestureVelocity = useRef({ x: 0, y: 0 });
-  const currentPosition = useRef(initialPosition);
-
-  // Clean up all intervals when component unmounts
-  useEffect(() => {
-    return () => {
-      if (pressTimer.current) {
-        clearTimeout(pressTimer.current);
-      }
-      if (hapticInterval.current) {
-        clearInterval(hapticInterval.current);
-      }
-    };
-  }, []);
-
-  // Set up position listener
+  const hasMovedSincePress = useRef(false);
+  const pressTimer = useRef<NodeJS.Timeout>();
+  const dragThresholdTimer = useRef<NodeJS.Timeout>();
+  const hapticInterval = useRef<NodeJS.Timeout>();
+  const animationFrameId = useRef<number>();
+  
+  // Position listener for tracking current position
   useEffect(() => {
     position.addListener((value) => {
-      currentPosition.current = value;
+      lastPosition.current = value;
+      onPositionChange(value.x, value.y);
     });
-
+    
     return () => {
       position.removeAllListeners();
+      if (pressTimer.current) clearTimeout(pressTimer.current);
+      if (dragThresholdTimer.current) clearTimeout(dragThresholdTimer.current);
+      if (hapticInterval.current) clearTimeout(hapticInterval.current);
+      if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
     };
   }, []);
-
-  const normalizeVelocity = () => {
-    const speed = Math.sqrt(
-      velocity.current.x * velocity.current.x +
-      velocity.current.y * velocity.current.y
-    );
-
-    if (speed > MAX_SPEED) {
-      const scale = MAX_SPEED / speed;
-      velocity.current.x *= scale;
-      velocity.current.y *= scale;
-    }
-
-    // Gradually adjust speed towards target speed
-    if (speed > TARGET_SPEED) {
-      velocity.current.x *= (1 - SPEED_ADJUSTMENT_RATE);
-      velocity.current.y *= (1 - SPEED_ADJUSTMENT_RATE);
-    } else if (speed < TARGET_SPEED) {
-      velocity.current.x *= (1 + SPEED_ADJUSTMENT_RATE);
-      velocity.current.y *= (1 + SPEED_ADJUSTMENT_RATE);
-    }
-  };
-
-  const checkCollisions = (x: number, y: number) => {
-    // Screen edge collisions
-    if (x <= 0) {
-      velocity.current.x = Math.abs(velocity.current.x) * COLLISION_BOUNCE;
-      x = 0;
-    } else if (x >= SCREEN_WIDTH - size) {
-      velocity.current.x = -Math.abs(velocity.current.x) * COLLISION_BOUNCE;
-      x = SCREEN_WIDTH - size;
-    }
-
-    if (y <= 0) {
-      velocity.current.y = Math.abs(velocity.current.y) * COLLISION_BOUNCE;
-      y = 0;
-    } else if (y >= SCREEN_HEIGHT - size) {
-      velocity.current.y = -Math.abs(velocity.current.y) * COLLISION_BOUNCE;
-      y = SCREEN_HEIGHT - size;
-    }
-
-    // Update position if it was adjusted
-    position.setValue({ x, y });
-  };
-
+  
+  // Start the animation loop when component mounts
+  useEffect(() => {
+    startAnimationLoop();
+  }, []);
+  
+  // Haptic feedback for popping
   const startHapticFeedback = () => {
     // Initial haptic feedback
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -123,13 +89,12 @@ export function TaskBubble({ task, onPress, onComplete, onPositionChange }: Task
     const startTime = Date.now();
     
     const updateHaptics = () => {
-      if (!isPressing) return;
+      if (!isPressing || !isPopping) return;
       
       // Calculate how long we've been pressing
       const pressDuration = Date.now() - startTime;
       
       // Decrease interval based on press duration
-      // Start slow, get faster exponentially
       interval = Math.max(
         minInterval,
         500 - (pressDuration / LONG_PRESS_DURATION) * 450
@@ -144,14 +109,156 @@ export function TaskBubble({ task, onPress, onComplete, onPositionChange }: Task
     // Start the haptic loop
     hapticInterval.current = setTimeout(updateHaptics, interval);
   };
-
+  
   const stopHapticFeedback = () => {
     if (hapticInterval.current) {
       clearTimeout(hapticInterval.current);
       hapticInterval.current = undefined;
     }
   };
-
+  
+  // Check for collisions with screen edges
+  const checkCollisions = () => {
+    let x = lastPosition.current.x;
+    let y = lastPosition.current.y;
+    let collided = false;
+    
+    // Screen edge collisions
+    if (x <= 0) {
+      velocity.current.x = Math.abs(velocity.current.x) * COLLISION_BOUNCE;
+      x = 0;
+      collided = true;
+    } else if (x >= SCREEN_WIDTH - size) {
+      velocity.current.x = -Math.abs(velocity.current.x) * COLLISION_BOUNCE;
+      x = SCREEN_WIDTH - size;
+      collided = true;
+    }
+    
+    if (y <= 0) {
+      velocity.current.y = Math.abs(velocity.current.y) * COLLISION_BOUNCE;
+      y = 0;
+      collided = true;
+    } else if (y >= SCREEN_HEIGHT - size) {
+      velocity.current.y = -Math.abs(velocity.current.y) * COLLISION_BOUNCE;
+      y = SCREEN_HEIGHT - size;
+      collided = true;
+    }
+    
+    // Update position if collided
+    if (collided) {
+      position.setValue({ x, y });
+    }
+    
+    return collided;
+  };
+  
+  // Animation loop for bubble movement
+  const startAnimationLoop = () => {
+    const animate = () => {
+      if (!isDragging) {
+        // Apply friction to gradually slow down
+        velocity.current.x *= isPopping ? 0.9 : NATURAL_FRICTION;
+        velocity.current.y *= isPopping ? 0.9 : NATURAL_FRICTION;
+        
+        // Add a tiny bit of random movement when not interacting
+        if (!isPressing && !isPopping) {
+          velocity.current.x += (Math.random() * 0.1 - 0.05) * INITIAL_VELOCITY;
+          velocity.current.y += (Math.random() * 0.1 - 0.05) * INITIAL_VELOCITY;
+        }
+        
+        // Ensure velocity doesn't get too small (keeps some movement)
+        const minVelocity = INITIAL_VELOCITY * 0.5;
+        const currentSpeed = Math.sqrt(
+          velocity.current.x * velocity.current.x + 
+          velocity.current.y * velocity.current.y
+        );
+        
+        if (currentSpeed < minVelocity && !isPopping) {
+          const scale = minVelocity / (currentSpeed || 0.01); // Avoid division by zero
+          velocity.current.x *= scale;
+          velocity.current.y *= scale;
+        }
+        
+        // Update position based on velocity
+        const newX = lastPosition.current.x + velocity.current.x;
+        const newY = lastPosition.current.y + velocity.current.y;
+        position.setValue({ x: newX, y: newY });
+        
+        // Check for collisions
+        checkCollisions();
+      }
+      
+      animationFrameId.current = requestAnimationFrame(animate);
+    };
+    
+    animate();
+  };
+  
+  // Handle bubble popping
+  const startPoppingProcess = () => {
+    setIsPopping(true);
+    
+    // Start visual scaling animation with immediate feedback
+    Animated.spring(scaleAnim, {
+      toValue: 1.15,
+      friction: 7,
+      tension: 40,
+      useNativeDriver: true,
+    }).start();
+    
+    // Start haptic feedback
+    startHapticFeedback();
+    
+    // Set a timer for completion
+    pressTimer.current = setTimeout(() => {
+      // Final pop haptic
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      
+      // Pop animation
+      Animated.sequence([
+        Animated.spring(scaleAnim, {
+          toValue: 1.5,
+          useNativeDriver: true,
+        }),
+        Animated.parallel([
+          Animated.timing(scaleAnim, {
+            toValue: 0,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+          Animated.timing(opacityAnim, {
+            toValue: 0,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+        ]),
+      ]).start(() => {
+        // Complete the task
+        onComplete();
+      });
+    }, LONG_PRESS_DURATION);
+  };
+  
+  // Cancel popping process properly
+  const cancelPoppingProcess = () => {
+    setIsPopping(false);
+    stopHapticFeedback();
+    
+    if (pressTimer.current) {
+      clearTimeout(pressTimer.current);
+      pressTimer.current = undefined;
+    }
+    
+    // Reset scale with a springy animation
+    Animated.spring(scaleAnim, {
+      toValue: 1,
+      friction: 5,
+      tension: 40,
+      useNativeDriver: true,
+    }).start();
+  };
+  
+  // Create pan responder for drag/press interactions
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: (evt) => {
@@ -170,153 +277,97 @@ export function TaskBubble({ task, onPress, onComplete, onPositionChange }: Task
         
         return distance <= size / 2;
       },
-      onPanResponderGrant: (_, gestureState) => {
-        position.stopAnimation();
+      onPanResponderGrant: () => {
+        // Start pressing
         setIsPressing(true);
         pressStartTime.current = Date.now();
-        pressStartPosition.current = {
-          x: gestureState.x0,
-          y: gestureState.y0
-        };
-        lastGestureVelocity.current = { x: 0, y: 0 };
+        hasMovedSincePress.current = false;
         
-        // Start the pop animation
-        Animated.timing(scaleAnim, {
-          toValue: 1.5,
-          duration: LONG_PRESS_DURATION,
-          useNativeDriver: true,
-        }).start();
-
-        startHapticFeedback();
-
-        pressTimer.current = setTimeout(() => {
-          stopHapticFeedback();
-          // Final strong haptic feedback for the pop
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          
-          // Pop animation
-          Animated.sequence([
-            Animated.spring(scaleAnim, {
-              toValue: 1.8,
-              useNativeDriver: true,
-            }),
-            Animated.parallel([
-              Animated.timing(scaleAnim, {
-                toValue: 0,
-                duration: 300,
-                useNativeDriver: true,
-              }),
-              Animated.timing(opacityAnim, {
-                toValue: 0,
-                duration: 300,
-                useNativeDriver: true,
-              }),
-            ]),
-          ]).start(() => {
-            onComplete();
-          });
-        }, LONG_PRESS_DURATION);
+        // Immediate haptic feedback that touch was registered
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        
+        // Set a timeout to determine if this is a drag or pop
+        dragThresholdTimer.current = setTimeout(() => {
+          if (!hasMovedSincePress.current && !isDragging) {
+            // User held for threshold duration without moving = start popping
+            startPoppingProcess();
+          }
+        }, DRAG_THRESHOLD_DURATION);
       },
       onPanResponderMove: (_, gestureState) => {
-        const newX = gestureState.moveX - size / 2;
-        const newY = gestureState.moveY - size / 2;
+        const { dx, dy, moveX, moveY } = gestureState;
         
+        // Track movement velocity for momentum
         lastGestureVelocity.current = {
           x: gestureState.vx,
           y: gestureState.vy
         };
         
-        position.setValue({ 
-          x: Math.max(0, Math.min(newX, SCREEN_WIDTH - size)),
-          y: Math.max(0, Math.min(newY, SCREEN_HEIGHT - size))
-        });
-        
-        onPositionChange(newX, newY);
-        checkCollisions(newX, newY);
+        // Determine if user has moved significantly
+        const movementDistance = Math.sqrt(dx * dx + dy * dy);
+        if (movementDistance > MOVEMENT_THRESHOLD) {
+          hasMovedSincePress.current = true;
+          
+          // If popping has started, cancel it
+          if (isPopping) {
+            cancelPoppingProcess();
+          }
+          
+          // If not dragging yet, start dragging
+          if (!isDragging) {
+            setIsDragging(true);
+            
+            // Clear drag threshold timer
+            if (dragThresholdTimer.current) {
+              clearTimeout(dragThresholdTimer.current);
+              dragThresholdTimer.current = undefined;
+            }
+          }
+          
+          // Position the bubble at touch point (centered on finger)
+          const newX = moveX - size / 2;
+          const newY = moveY - size / 2;
+          
+          // Keep bubble within screen bounds
+          const boundedX = Math.max(0, Math.min(newX, SCREEN_WIDTH - size));
+          const boundedY = Math.max(0, Math.min(newY, SCREEN_HEIGHT - size));
+          
+          position.setValue({ x: boundedX, y: boundedY });
+        }
       },
-      onPanResponderRelease: (_, gestureState) => {
+      onPanResponderRelease: () => {
+        // End pressing state
         setIsPressing(false);
-        stopHapticFeedback();
+        setIsDragging(false);
         
-        if (pressTimer.current) {
-          clearTimeout(pressTimer.current);
+        // Clear timers
+        if (dragThresholdTimer.current) {
+          clearTimeout(dragThresholdTimer.current);
         }
         
-        const pressDuration = Date.now() - pressStartTime.current;
-        const moveDistance = Math.sqrt(
-          Math.pow(gestureState.dx, 2) +
-          Math.pow(gestureState.dy, 2)
-        );
-
-        if (pressDuration < 200 && moveDistance < 10) {
-          onPress();
+        // If we were popping, cancel it
+        if (isPopping) {
+          // Cancel popping
+          cancelPoppingProcess();
+        } else {
+          // Handle short tap (if it wasn't a drag)
+          const pressDuration = Date.now() - pressStartTime.current;
+          if (pressDuration < 200 && !hasMovedSincePress.current) {
+            onPress();
+          }
+          
+          // If was dragging, transfer gesture velocity to bubble
+          if (hasMovedSincePress.current) {
+            velocity.current = {
+              x: lastGestureVelocity.current.x * 5, // Amplify gesture velocity
+              y: lastGestureVelocity.current.y * 5
+            };
+          }
         }
-        
-        // Increased velocity retention from 0.99 to 1.2 to make throws more energetic
-        velocity.current = {
-          x: lastGestureVelocity.current.x * 1.2,
-          y: lastGestureVelocity.current.y * 1.2
-        };
-        
-        scaleAnim.setValue(1);
-        startFloatingAnimation();
       },
     })
   ).current;
-
-  useEffect(() => {
-    startFloatingAnimation();
-    return () => {
-      if (pressTimer.current) {
-        clearTimeout(pressTimer.current);
-      }
-    };
-  }, []);
-
-  const startFloatingAnimation = () => {
-    let animationFrame: number;
-
-    const animate = () => {
-      const currentX = currentPosition.current.x;
-      const currentY = currentPosition.current.y;
-
-      // Only apply random forces when not pressing
-      if (!isPressing) {
-        velocity.current.x += (Math.random() * 2 - 1) * RANDOM_FORCE;
-        velocity.current.y += (Math.random() * 2 - 1) * RANDOM_FORCE;
-      }
-
-      // Apply drag
-      velocity.current.x *= DRAG_COEFFICIENT;
-      velocity.current.y *= DRAG_COEFFICIENT;
-
-      // Normalize velocity
-      normalizeVelocity();
-
-      // Update position
-      const newX = currentX + velocity.current.x;
-      const newY = currentY + velocity.current.y;
-
-      // Check for collisions with screen edges
-      checkCollisions(newX, newY);
-
-      // Update position tracking
-      onPositionChange(currentPosition.current.x, currentPosition.current.y);
-
-      animationFrame = requestAnimationFrame(animate);
-    };
-
-    animate();
-
-    return () => {
-      if (animationFrame) {
-        cancelAnimationFrame(animationFrame);
-      }
-    };
-  };
-
-  const color = BUBBLE_COLORS[task.priority];
-
+  
   return (
     <Animated.View
       {...panResponder.panHandlers}
